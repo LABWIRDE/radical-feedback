@@ -18,7 +18,7 @@
     lastKey: '',
     lastJson: '',
     busy: false,
-    ui: { show: false, values: null, round: 0, editing: false, createText: '', createError: '' }
+    ui: { show: false, values: null, round: 0, editing: false, createText: '', createError: '', stars: 0, fbText: '' }
   };
 
   /* ---------------- Hilfen ---------------- */
@@ -478,15 +478,151 @@
     return out;
   }
 
+  function doneKey() { return 'rf_done_' + st.sid; }
+
   function viewFinal() {
     const s = st.status;
-    return [
-      h('h1', null, t('final_title')),
-      h('p', null, t('final_text')),
-      resultTable(s.result),
-      teambild(s.teambild),
-      deleteBlock()
-    ];
+    const done = (s.me && s.me.feedbackDone) || store.get(doneKey());
+    const out = [];
+    if (done) {
+      out.push(h('h1', null, t('done_title')), h('p', null, t('done_text')));
+    } else {
+      out.push(h('h1', null, t('final_title')), h('p', null, t('final_text')));
+    }
+    out.push(resultTable(s.result), teambild(s.teambild));
+    out.push(h('button', { class: 'btn secondary', onclick: saveResult }, t('btn_save_result')));
+    if (!done) out.push(feedbackBlock());
+    out.push(deleteBlock());
+    return out;
+  }
+
+  function feedbackBlock() {
+    const starsBox = h('div', { class: 'stars', role: 'radiogroup', 'aria-label': t('feedback_stars_label') });
+    function drawStars() {
+      starsBox.replaceChildren.apply(starsBox, [1, 2, 3, 4, 5].map(function (i) {
+        return h('button', {
+          class: 'star' + (st.ui.stars >= i ? ' on' : ''),
+          'aria-label': i + ' / 5',
+          onclick: function () { st.ui.stars = (st.ui.stars === i ? 0 : i); drawStars(); }
+        }, '★');
+      }));
+    }
+    drawStars();
+    const ta = h('textarea', {
+      class: 'feedback-text',
+      placeholder: t('feedback_placeholder'),
+      maxlength: '2000',
+      value: st.ui.fbText,
+      oninput: function (e) { st.ui.fbText = e.target.value; }
+    });
+    return h('div', { class: 'card' },
+      h('h2', { class: 'card-title' }, t('feedback_title')),
+      h('p', { class: 'muted small' }, t('feedback_stars_label')),
+      starsBox,
+      h('p', { class: 'muted small' }, t('feedback_text_label')),
+      ta,
+      h('button', {
+        class: 'btn',
+        onclick: async function () {
+          const text = (st.ui.fbText || '').trim();
+          if (!st.ui.stars && !text) { await info(t('err_feedback_empty')); return; }
+          const r = await act('feedback', { stars: st.ui.stars || null, text: text, lang: LANG });
+          if (!r) return;
+          store.set(doneKey(), true);
+          render(true);
+        }
+      }, t('btn_feedback_send')),
+      h('button', {
+        class: 'btn secondary',
+        onclick: function () { store.set(doneKey(), true); render(true); }
+      }, t('btn_finish_skip')));
+  }
+
+  /** Eigenes Ergebnis als Bild (PNG) speichern. */
+  function saveResult() {
+    const s = st.status;
+    const res = s.result;
+    if (!res) return;
+    const meId = s.me ? s.me.id : null;
+    const rows = res.rows.slice().sort(function (a, b) { return b.share - a.share; });
+    const withSF = rows.some(function (r) { return r.S !== null || r.F !== null; });
+    const tb = s.teambild;
+    const lines = [];
+    if (tb) {
+      if (tb.accuracy) lines.push(t('tb_accuracy_' + tb.accuracy));
+      if (tb.direction) lines.push(t('tb_direction_' + tb.direction));
+      if (tb.convergence) lines.push(t('tb_convergence_' + tb.convergence));
+    }
+    const d = new Date();
+    const date = String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0') + '.' + String(d.getFullYear()).slice(2);
+
+    const W = 900, pad = 48, rowH = 52, scale = 2;
+    const cv = document.createElement('canvas');
+    const ctx = cv.getContext('2d');
+    const font = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+
+    // Teambild-Zeilen umbrechen
+    ctx.font = '26px ' + font;
+    const wrapped = [];
+    lines.forEach(function (l) {
+      const words = l.split(' ');
+      let cur = '• ';
+      words.forEach(function (w) {
+        const test = cur + w + ' ';
+        if (ctx.measureText(test).width > W - 2 * pad && cur !== '• ') { wrapped.push(cur); cur = '   ' + w + ' '; }
+        else cur = test;
+      });
+      wrapped.push(cur);
+    });
+
+    const H = pad + 60 + 40 + 30 + rowH * (rows.length + 1) + (wrapped.length ? 70 + wrapped.length * 38 : 0) + pad;
+    cv.width = W * scale; cv.height = H * scale;
+    ctx.scale(scale, scale);
+    ctx.fillStyle = '#f6f5f2'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#1d1d1b';
+    let y = pad + 40;
+    ctx.font = 'bold 40px ' + font; ctx.fillText(t('app_title'), pad, y);
+    y += 40;
+    ctx.font = '24px ' + font; ctx.fillStyle = '#6b6a66'; ctx.fillText(date, pad, y);
+    y += 50;
+
+    const cols = withSF ? [pad, W - pad - 420, W - pad - 250, W - pad] : [pad, W - pad];
+    ctx.font = 'bold 22px ' + font; ctx.fillStyle = '#6b6a66';
+    ctx.textAlign = 'left'; ctx.fillText(t('col_name'), cols[0], y);
+    ctx.textAlign = 'right';
+    if (withSF) {
+      ctx.fillText(t('col_share'), cols[1], y); ctx.fillText(t('col_self'), cols[2], y); ctx.fillText(t('col_other'), cols[3], y);
+    } else {
+      ctx.fillText(t('col_share'), cols[1], y);
+    }
+    rows.forEach(function (r) {
+      y += rowH;
+      if (r.id === meId) { ctx.fillStyle = '#fff4ec'; ctx.fillRect(pad - 12, y - 34, W - 2 * pad + 24, rowH - 4); }
+      ctx.fillStyle = '#1d1d1b'; ctx.font = '28px ' + font;
+      ctx.textAlign = 'left'; ctx.fillText(r.name + (r.id === meId ? ' (' + t('you') + ')' : ''), cols[0], y);
+      ctx.textAlign = 'right';
+      if (withSF) {
+        ctx.fillText(fmt(r.share), cols[1], y); ctx.fillText(fmt(r.S), cols[2], y); ctx.fillText(fmt(r.F), cols[3], y);
+      } else {
+        ctx.fillText(fmt(r.share), cols[1], y);
+      }
+    });
+    ctx.textAlign = 'left';
+    if (wrapped.length) {
+      y += 70;
+      ctx.font = 'bold 28px ' + font; ctx.fillStyle = '#1d1d1b'; ctx.fillText(t('teambild_title'), pad, y);
+      ctx.font = '26px ' + font;
+      wrapped.forEach(function (l) { y += 38; ctx.fillText(l, pad, y); });
+    }
+
+    cv.toBlob(function (blob) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'radical-feedback-' + date + '.png';
+      document.body.append(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    }, 'image/png');
   }
 
   function viewRemoved() {
@@ -557,9 +693,6 @@
   function peopleCard() {
     const s = st.status;
     const me = s.me;
-    const activeCount = s.people.filter(function (p) { return p.active; }).length;
-    const canRemove = s.phase === 'lobby' ? s.people.length > 3 : activeCount > 3;
-
     const items = s.people.map(function (p) {
       let text, ok = false;
       if (!p.active) text = t('st_absent');
@@ -572,45 +705,61 @@
       } else if (s.phase === 'discuss') {
         if (p.ready2) { text = t('st_ready'); ok = true; } else text = t('st_not_ready');
       }
-      const removable = canRemove && p.active && me && me.active && p.id !== me.id;
       return h('li', null,
         h('span', null, p.name + (me && p.id === me.id ? ' (' + t('you') + ')' : '')),
-        h('span', null,
-          h('span', { class: 'st' + (ok ? ' ok' : '') }, text || ''),
-          removable ? ' ' : null,
-          removable ? h('button', {
-            class: 'btn secondary inline',
-            onclick: async function () {
-              const key = s.phase === 'lobby' ? 'confirm_remove_lobby' : 'confirm_remove_later';
-              const yes = await modal(t(key, { name: p.name }), t('btn_confirm_remove'), t('btn_cancel'));
-              if (!yes) return;
-              const r = await act('remove', { target: p.id });
-              if (r) refresh(true);
-            }
-          }, t('btn_remove')) : null));
+        h('span', { class: 'st' + (ok ? ' ok' : '') }, text || ''));
     });
     return [h('h2', null, t('people_title')), h('div', { class: 'card' }, h('ul', { class: 'people' }, items))];
   }
 
   /* ---------------- Start ---------------- */
 
-  async function loadLang() {
+  const LANGS = ['de', 'ru', 'en'];
+
+  function pickLang() {
     const params = new URLSearchParams(location.search);
-    LANG = params.get('lang') || store.get('rf_lang') || C.DEFAULT_LANG || 'de';
+    const fromUrl = params.get('lang');
+    if (LANGS.indexOf(fromUrl) >= 0) return fromUrl;
+    const saved = store.get('rf_lang');
+    if (LANGS.indexOf(saved) >= 0) return saved;
+    const nav = (navigator.language || '').slice(0, 2).toLowerCase();
+    return LANGS.indexOf(nav) >= 0 ? nav : 'en';
+  }
+
+  async function loadLang(lang) {
     try {
-      const r = await fetch('lang/' + LANG + '.json', { cache: 'no-cache' });
+      const r = await fetch('lang/' + lang + '.json', { cache: 'no-cache' });
       T = await r.json();
+      LANG = lang;
     } catch (e) {
-      LANG = 'de';
       const r = await fetch('lang/de.json');
       T = await r.json();
+      LANG = 'de';
     }
     document.documentElement.lang = LANG;
     NUM = new Intl.NumberFormat(LANG, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    drawLangs();
+  }
+
+  function drawLangs() {
+    const box = document.getElementById('langs');
+    if (!box) return;
+    box.replaceChildren.apply(box, LANGS.map(function (l) {
+      return h('button', {
+        class: 'lang' + (l === LANG ? ' on' : ''),
+        'aria-pressed': l === LANG ? 'true' : 'false',
+        onclick: async function () {
+          if (l === LANG) return;
+          store.set('rf_lang', l);
+          await loadLang(l);
+          render(true);
+        }
+      }, l.toUpperCase());
+    }));
   }
 
   async function init() {
-    await loadLang();
+    await loadLang(pickLang());
     const params = new URLSearchParams(location.search);
     const sid = params.get('s');
     if (!sid) { render(true); return; }
