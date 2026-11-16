@@ -17,6 +17,8 @@ const CFG = {
   DELETE_AFTER_MS: 24 * 3600 * 1000, // manuelles Löschen frühestens 1 Tag nach Endergebnis
   MAX_NOTICES: 20,
   STATS_SHEET: 'Statistik',
+  FEEDBACK_SHEET: 'Feedback',
+  FEEDBACK_MAX: 2000,             // maximale Länge des Feedback-Textes
   SHEET_ID: '1xSiuKGH_hbqucQ-t_4LLoZ9_av4UO8_VUGfGf0iLaC0' // Google Sheet "Radical Feedback – Statistik"
 };
 
@@ -63,7 +65,7 @@ const ACTIONS_ = {
   ready: ready_,
   submit: submit_,
   ready2: ready2_,
-  remove: remove_,
+  feedback: feedback_,
   deleteSession: deleteSession_
 };
 
@@ -248,26 +250,35 @@ function ready2_(req) {
   return { ok: true };
 }
 
-function remove_(req) {
+/** Anonymes Feedback am Ende: Sterne (1–5) und/oder Text, ohne Namen und ohne Session-ID gespeichert. */
+function feedback_(req) {
   const s = load_(req.id);
-  const me = auth_(s, req);
-  if (!me.active) fail_('removed');
-  const t = person_(s, req.target);
-  if (!t || !t.active) fail_('no_person');
-
-  if (s.phase === PHASE.LOBBY) {
-    if (s.people.length - 1 < CFG.MIN) fail_('min');
-    s.people = s.people.filter(function (p) { return p.id !== t.id; });
-    notice_(s, 'deleted', t.name);
-  } else if (s.phase === PHASE.R1 || s.phase === PHASE.DISCUSS || s.phase === PHASE.R2) {
-    if (active_(s).length - 1 < CFG.MIN) fail_('min');
-    t.active = false;          // bleibt "nur bewertet"
-    delete s.subs[t.id];
-    notice_(s, 'removed', t.name);
-  } else {
-    fail_('phase');
+  if (s.phase !== PHASE.FINAL) fail_('phase');
+  const p = auth_(s, req);
+  if (p.feedbackDone) fail_('done');
+  const stars = req.stars === null || req.stars === undefined ? null : req.stars;
+  if (stars !== null && !(Number.isInteger(stars) && stars >= 1 && stars <= 5)) fail_('bad_values');
+  const text = String(req.text || '').trim().slice(0, CFG.FEEDBACK_MAX);
+  if (stars === null && !text) fail_('feedback_empty');
+  try {
+    const ss = SpreadsheetApp.openById(CFG.SHEET_ID);
+    let sh = ss.getSheetByName(CFG.FEEDBACK_SHEET);
+    if (!sh) {
+      sh = ss.insertSheet(CFG.FEEDBACK_SHEET);
+      sh.appendRow(['Datum', 'Sterne (1–5)', 'Ideen und Verbesserungsvorschläge', 'Sprache']);
+      sh.setFrozenRows(1);
+    }
+    sh.appendRow([
+      Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd.MM.yy'),
+      stars === null ? '' : stars,
+      text,
+      String(req.lang || '').slice(0, 5)
+    ]);
+  } catch (err) {
+    console.error('Feedback konnte nicht geschrieben werden: ' + err);
+    fail_('server');
   }
-  advance_(s);
+  p.feedbackDone = true;
   save_(s);
   return { ok: true };
 }
@@ -486,7 +497,7 @@ function status_(req) {
     }),
     me: me ? {
       id: me.id, active: me.active, ready: me.ready, ready2: me.ready2, show: me.show,
-      submitted: !!s.subs[me.id]
+      submitted: !!s.subs[me.id], feedbackDone: !!me.feedbackDone
     } : null,
     result: result_(s, me),
     teambild: s.phase === PHASE.FINAL ? s.teambild : null,
