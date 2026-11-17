@@ -65,6 +65,9 @@ const ACTIONS_ = {
   ready: ready_,
   submit: submit_,
   ready2: ready2_,
+  remove: remove_,
+  restore: restore_,
+  release: release_,
   feedback: feedback_,
   deleteSession: deleteSession_
 };
@@ -203,7 +206,12 @@ function claim_(req) {
   const s = load_(req.id);
   const p = person_(s, req.pid);
   if (!p) fail_('no_person');
-  if (!p.active) fail_('removed');
+  if (!p.active) {
+    if (s.phase !== PHASE.LOBBY) fail_('removed');
+    p.active = true; // als abwesend markiert, kommt aber doch: wieder dabei
+    p.ready = false;
+    notice_(s, 'restored', p.name);
+  }
   if (p.token && !req.force) fail_('taken');
   if (p.token) {
     // "Das bin ich, zurücksetzen": alles vom anderen Handy wird verworfen
@@ -220,8 +228,9 @@ function ready_(req) {
   const s = load_(req.id);
   if (s.phase !== PHASE.LOBBY) fail_('phase');
   const p = auth_(s, req);
+  if (!p.active) fail_('removed');
   p.ready = true;
-  p.show = s.people.length > 3 && !!req.show;
+  p.show = active_(s).length > 3 && !!req.show;
   advance_(s);
   save_(s);
   return { ok: true };
@@ -246,6 +255,58 @@ function ready2_(req) {
   if (!p.active) fail_('removed');
   p.ready2 = true;
   advance_(s);
+  save_(s);
+  return { ok: true };
+}
+
+/**
+ * Person als abwesend markieren. Sie schätzt nicht (mehr) mit ein, wird aber von den anderen
+ * eingeschätzt und erhält die durchschnittliche Korrektur (Konzept, Abschnitt 4).
+ * In der Vorstellung lässt sich das mit restore_ rückgängig machen, danach nicht mehr.
+ */
+function remove_(req) {
+  const s = load_(req.id);
+  if (s.phase === PHASE.FINAL || s.phase === PHASE.ERROR) fail_('phase');
+  const me = auth_(s, req);
+  if (!me.active) fail_('removed');
+  const p = person_(s, req.pid);
+  if (!p) fail_('no_person');
+  if (!p.active) return { ok: true };
+  if (active_(s).length - 1 < CFG.MIN) fail_('min_people');
+  p.active = false;
+  p.ready = false;
+  p.ready2 = false;
+  p.show = false;
+  delete s.subs[p.id];
+  notice_(s, 'removed', p.name);
+  advance_(s);
+  save_(s);
+  return { ok: true };
+}
+
+/** Nur in der Vorstellung: eine als abwesend markierte Person ist doch dabei. */
+function restore_(req) {
+  const s = load_(req.id);
+  if (s.phase !== PHASE.LOBBY) fail_('phase');
+  auth_(s, req);
+  const p = person_(s, req.pid);
+  if (!p) fail_('no_person');
+  if (p.active) return { ok: true };
+  p.active = true;
+  p.ready = false;
+  notice_(s, 'restored', p.name);
+  save_(s);
+  return { ok: true };
+}
+
+/** Nur in der Vorstellung: falschen Namen wieder freigeben („Nicht ich“). */
+function release_(req) {
+  const s = load_(req.id);
+  if (s.phase !== PHASE.LOBBY) fail_('phase');
+  const p = auth_(s, req);
+  p.token = null;
+  p.ready = false;
+  p.show = false;
   save_(s);
   return { ok: true };
 }
@@ -305,7 +366,7 @@ function advance_(s) {
     changed = false;
     const act = active_(s);
     if (s.phase === PHASE.LOBBY) {
-      if (s.people.length >= CFG.MIN && s.people.every(function (p) { return p.token && p.ready; })) {
+      if (act.length >= CFG.MIN && act.every(function (p) { return p.token && p.ready; })) {
         s.phase = PHASE.R1;
         s.subs = {};
         changed = true;
@@ -427,9 +488,9 @@ function teamMetrics_(s) {
   };
 }
 
-/** Teambild für die Handys: bei 3 Teilnehmenden keins (Anonymität). */
+/** Teambild für die Handys: bei 3 Einschätzenden keins (Anonymität). */
 function teambild_(s) {
-  if (s.people.length <= 3) return null;
+  if (active_(s).length <= 3) return null;
   const m = teamMetrics_(s);
   return { accuracy: m.accuracy, direction: m.direction, convergence: m.convergence };
 }
@@ -488,7 +549,7 @@ function status_(req) {
     id: s.id,
     phase: s.phase,
     n: n,
-    small: n <= 3,
+    small: active_(s).length <= 3,
     people: s.people.map(function (p) {
       return {
         id: p.id, name: p.name, claimed: !!p.token, ready: p.ready, ready2: p.ready2,
@@ -496,10 +557,11 @@ function status_(req) {
       };
     }),
     me: me ? {
-      id: me.id, active: me.active, ready: me.ready, ready2: me.ready2, show: me.show,
+      id: me.id, name: me.name, active: me.active, ready: me.ready, ready2: me.ready2, show: me.show,
       submitted: !!s.subs[me.id], feedbackDone: !!me.feedbackDone
     } : null,
     result: result_(s, me),
+    interim: s.phase === PHASE.R2 && s.results.r1 ? view_(s, s.results.r1, 1, me) : null,
     teambild: s.phase === PHASE.FINAL ? s.teambild : null,
     canDelete: (s.phase === PHASE.FINAL && Date.now() - s.finalAt >= CFG.DELETE_AFTER_MS) || s.phase === PHASE.ERROR,
     notices: s.notices
@@ -512,9 +574,11 @@ function result_(s, me) {
   if (s.phase === PHASE.FINAL) { res = s.results.r2; round = 2; }
   else if (s.phase === PHASE.DISCUSS) { res = s.results.r1; round = 1; }
   if (!res) return null;
+  return view_(s, res, round, me);
+}
 
-  const n = s.people.length;
-  const full = n > 3 && active_(s).every(function (p) { return p.show; });
+function view_(s, res, round, me) {
+  const full = active_(s).length > 3 && active_(s).every(function (p) { return p.show; });
   const r1 = function (x) { return x === null ? null : Math.round(x * 10) / 10; };
 
   return {
