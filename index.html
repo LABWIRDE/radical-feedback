@@ -9,8 +9,11 @@
 <body>
   <header class="top">
     <span class="brand">Radical Feedback</span>
+    <span id="me" class="me"></span>
     <nav id="langs" class="langs" aria-label="Sprache / Язык / Language"></nav>
   </header>
+  <ol id="steps" class="stepbar hidden"></ol>
+  <div id="offline" class="offline hidden" role="status"></div>
   <div id="notices" class="notices" aria-live="polite"></div>
   <main id="app" class="app">
     <p class="muted">…</p>
@@ -24,6 +27,7 @@
       </div>
     </div>
   </div>
+  <script src="qrcode.js"></script>
   <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
